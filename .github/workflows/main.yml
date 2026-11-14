@@ -1,0 +1,110 @@
+name: Omni Build
+run-name: Omni build ${{ inputs.job }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "ID job dari bot"
+        required: true
+        type: string
+      kind:
+        description: "flutter atau android"
+        required: true
+        type: string
+      root:
+        description: "Folder project di dalam ZIP"
+        required: false
+        default: "."
+        type: string
+      mode:
+        description: "debug atau release"
+        required: false
+        default: "release"
+        type: string
+      split:
+        description: "Pisah APK per arsitektur (Flutter)"
+        required: false
+        default: "false"
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      JOB: ${{ inputs.job }}
+      ROOT: ${{ inputs.root }}
+      MODE: ${{ inputs.mode }}
+      SPLIT: ${{ inputs.split }}
+    steps:
+      - name: Ambil ZIP project
+        uses: actions/checkout@v4
+
+      - name: Ekstrak project
+        run: |
+          set -e
+          case "$MODE" in debug|release) ;; *) echo "Mode ga valid: $MODE"; exit 1 ;; esac
+          case "$ROOT" in *..*) echo "Folder ga valid: $ROOT"; exit 1 ;; esac
+          mkdir -p work
+          unzip -q "jobs/$JOB/project.zip" -d work
+          echo "PROJECT_DIR=$GITHUB_WORKSPACE/work/$ROOT" >> "$GITHUB_ENV"
+          ls -la "work/$ROOT"
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Flutter
+        if: inputs.kind == 'flutter'
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Build Flutter
+        if: inputs.kind == 'flutter'
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+          flutter --version
+          flutter pub get
+          if [ "$SPLIT" = "true" ]; then
+            flutter build apk --$MODE --split-per-abi
+          else
+            flutter build apk --$MODE
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp build/app/outputs/flutter-apk/*.apk "$GITHUB_WORKSPACE/out/"
+
+      - name: Setup Gradle
+        if: inputs.kind == 'android'
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build Android
+        if: inputs.kind == 'android'
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+          chmod +x ./gradlew
+          if [ "$MODE" = "release" ]; then
+            ./gradlew assembleRelease --no-daemon --stacktrace
+          else
+            ./gradlew assembleDebug --no-daemon --stacktrace
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          find . -path "*/build/outputs/apk/*" -name "*.apk" -exec cp {} "$GITHUB_WORKSPACE/out/" \;
+
+      - name: Cek hasil
+        run: |
+          ls -la out || true
+          test -n "$(ls out/*.apk 2>/dev/null)" || { echo "Ga ada APK yang dihasilkan"; exit 1; }
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ inputs.job }}
+          path: out/*.apk
+          retention-days: 1
